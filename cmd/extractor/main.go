@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +32,10 @@ var (
 
 	logger     *zap.Logger
 	loggerOnce sync.Once
+)
+
+const (
+	img = "library/busybox:1.37.0"
 )
 
 func main() {
@@ -58,6 +62,11 @@ func main() {
 				EnvVars:  []string{"DIRECTORY"},
 				Required: true,
 				Usage:    "The directory in which to export the OpenTelemetry Collector files.",
+			},
+			&cli.StringFlag{
+				Name:    "registry",
+				EnvVars: []string{"REGISTRY"},
+				Usage:   "An optional OCI registry from which to pool the Docker image used to extract the files (" + img + ").",
 			},
 		},
 		Action: run,
@@ -111,10 +120,16 @@ func run(c *cli.Context) error {
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{
 				{
-					Name:    "copy",
-					Image:   "library/busybox:1.37.0",
+					Name: "copy",
+					Image: func() string {
+						reg := c.String("registry")
+						if reg != "" && !strings.HasSuffix(reg, "/") {
+							reg += "/"
+						}
+						return reg + img
+					}(),
 					Command: []string{"/bin/sh", "-c", "--"},
-					Args:    []string{"while true; do sleep 30; done;"},
+					Args:    []string{"sleep infinity"},
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "data",
@@ -258,14 +273,17 @@ func untar(r io.Reader, dest string) error {
 			return err
 		}
 
-		target := path.Join(dest, hdr.Name)
+		target := filepath.Join(dest, hdr.Name)
+		if !strings.HasPrefix(target, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return fmt.Errorf("filepath is tainted: %s", dest)
+		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0755); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(path.Dir(target), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return err
 			}
 			f, err := os.Create(target)
